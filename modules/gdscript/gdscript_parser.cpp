@@ -97,6 +97,7 @@ GDScriptParser::GDScriptParser() {
 		register_annotation(MethodInfo("@icon", PropertyInfo(Variant::STRING, "icon_path")), AnnotationInfo::SCRIPT, &GDScriptParser::icon_annotation);
 		register_annotation(MethodInfo("@static_unload"), AnnotationInfo::SCRIPT, &GDScriptParser::static_unload_annotation);
 		register_annotation(MethodInfo("@abstract"), AnnotationInfo::SCRIPT | AnnotationInfo::CLASS | AnnotationInfo::FUNCTION, &GDScriptParser::abstract_annotation);
+		register_annotation(MethodInfo("@interface"), AnnotationInfo::SCRIPT | AnnotationInfo::CLASS, &GDScriptParser::interface_annotation);
 		// Onready annotation.
 		register_annotation(MethodInfo("@onready"), AnnotationInfo::VARIABLE, &GDScriptParser::onready_annotation);
 		// Export annotations.
@@ -4392,6 +4393,28 @@ bool GDScriptParser::abstract_annotation(AnnotationNode *p_annotation, Node *p_t
 			return false;
 		}
 		function_node->is_abstract = true;
+		return true;
+	}
+	ERR_FAIL_V_MSG(false, R"("@abstract" annotation can only be applied to classes and functions.)");
+}
+
+bool GDScriptParser::interface_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
+	// NOTE: Use `p_target`, **not** `p_class`, because when `p_target` is a class then `p_class` refers to the outer class.
+	if (p_target->type == Node::CLASS) {
+		ClassNode *class_node = static_cast<ClassNode *>(p_target);
+		if (class_node->is_interface) {
+			push_error(R"("@interface" annotation can only be used once per class.)", p_annotation);
+			return false;
+		}
+		if (class_node->is_abstract) {
+			push_error(R"("@abstract" annotation cannot be used alongside "@interface".)", p_annotation);
+			return false;
+		}
+		if (class_node->extends_used) {
+			push_error(R"(Classes marked with "@interface" cannot derive from other classes.)");
+			return false;
+		}
+		class_node->is_interface = true;
 		return true;
 	}
 	ERR_FAIL_V_MSG(false, R"("@abstract" annotation can only be applied to classes and functions.)");
