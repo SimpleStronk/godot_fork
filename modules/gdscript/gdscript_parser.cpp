@@ -672,7 +672,7 @@ void GDScriptParser::parse_program() {
 		}
 	}
 
-	if (current.type == GDScriptTokenizer::Token::CLASS_NAME || current.type == GDScriptTokenizer::Token::EXTENDS) {
+	if (current.type == GDScriptTokenizer::Token::CLASS_NAME || current.type == GDScriptTokenizer::Token::EXTENDS || GDScriptTokenizer::Token::IMPLEMENTS) {
 		// Set range of the class to only start at extends or class_name if present.
 		reset_extents(head, current);
 	}
@@ -699,6 +699,15 @@ void GDScriptParser::parse_program() {
 					end_statement("superclass");
 				}
 				break;
+			case GDScriptTokenizer::Token::IMPLEMENTS:
+				PUSH_PENDING_ANNOTATIONS_TO_HEAD;
+				advance();
+				if (head->implements_used) {
+					push_error(R"("implements" can only be used once.)");
+				} else {
+					parse_implements();
+					end_statement("implemented class");
+				}
 			case GDScriptTokenizer::Token::TK_EOF:
 				PUSH_PENDING_ANNOTATIONS_TO_HEAD;
 				can_have_class_or_extends = false;
@@ -941,6 +950,10 @@ void GDScriptParser::parse_extends() {
 		}
 		current_class->extends.push_back(parse_identifier());
 	}
+}
+
+void GDScriptParser::parse_implements() {
+	current_class->implements_used = true;
 }
 
 template <typename T>
@@ -4192,6 +4205,7 @@ GDScriptParser::ParseRule *GDScriptParser::get_rule(GDScriptTokenizer::Token::Ty
 		{ nullptr,                                          nullptr,                                        PREC_NONE }, // ENUM,
 		{ nullptr,                                          nullptr,                                        PREC_NONE }, // EXTENDS,
 		{ &GDScriptParser::parse_lambda,                    nullptr,                                        PREC_NONE }, // FUNC,
+		{ nullptr,											nullptr,										PREC_NONE }, // IMPLEMENTS
 		{ nullptr,                                          &GDScriptParser::parse_binary_operator,      	PREC_CONTENT_TEST }, // TK_IN,
 		{ nullptr,                                          &GDScriptParser::parse_type_test,            	PREC_TYPE_TEST }, // IS,
 		{ nullptr,                                          nullptr,                                        PREC_NONE }, // NAMESPACE,

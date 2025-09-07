@@ -2758,6 +2758,7 @@ Vector<String> GDScriptLanguage::get_reserved_words() const {
 		"enum",
 		"extends",
 		"func",
+		"implements",
 		"namespace", // Reserved for potential future use.
 		"signal",
 		"static",

@@ -746,6 +746,7 @@ public:
 		HashMap<StringName, int> members_indices;
 		ClassNode *outer = nullptr;
 		bool extends_used = false;
+		bool implements_used = false;
 		bool onready_used = false;
 		bool is_abstract = false;
 		bool is_interface = false;
@@ -1512,6 +1513,7 @@ private:
 	ClassNode *parse_class(bool p_is_static);
 	void parse_class_name();
 	void parse_extends();
+	void parse_implements();
 	void parse_class_body(bool p_is_multiline);
 	template <typename T>
 	void parse_class_member(T *(GDScriptParser::*p_parse_function)(bool), AnnotationInfo::TargetKind p_target, const String &p_member_kind, bool p_is_static = false);
