@@ -876,6 +876,10 @@ GDScriptParser::ClassNode *GDScriptParser::parse_class(bool p_is_static) {
 		parse_extends();
 	}
 
+	if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+		parse_implements();
+	}
+
 	consume(GDScriptTokenizer::Token::COLON, R"(Expected ":" after class declaration.)");
 
 	bool multiline = match(GDScriptTokenizer::Token::NEWLINE);
@@ -892,6 +896,14 @@ GDScriptParser::ClassNode *GDScriptParser::parse_class(bool p_is_static) {
 		}
 		parse_extends();
 		end_statement("superclass");
+	}
+
+	if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+		if (n_class->implements_used) {
+			push_error(R"(Cannot use "implements" more than once in the same class.)");
+		}
+		parse_implements();
+		end_statement("implemented class");
 	}
 
 	parse_class_body(multiline);
@@ -914,7 +926,16 @@ void GDScriptParser::parse_class_name() {
 	if (match(GDScriptTokenizer::Token::EXTENDS)) {
 		// Allow extends on the same line.
 		parse_extends();
-		end_statement("superclass");
+
+		if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+			parse_implements();
+			end_statement("interface");
+		} else {
+			end_statement("superclass");
+		}
+	} else if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+		parse_implements();
+		end_statement("interface");
 	} else {
 		end_statement("class_name statement");
 	}
@@ -954,6 +975,18 @@ void GDScriptParser::parse_extends() {
 
 void GDScriptParser::parse_implements() {
 	current_class->implements_used = true;
+
+	if (!consume(GDScriptTokenizer::Token::IDENTIFIER, R"(Expected interface name after "implements".)")) {
+		return;
+	}
+	current_class->implements.push_back(parse_identifier());
+
+	while (match(GDScriptTokenizer::Token::COMMA)) {
+		if (!consume(GDScriptTokenizer::Token::IDENTIFIER, R"(Expected interface name after ",".)")) {
+			return;
+		}
+		current_class->implements.push_back(parse_identifier());
+	}
 }
 
 template <typename T>
