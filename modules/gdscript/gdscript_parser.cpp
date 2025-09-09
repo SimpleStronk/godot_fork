@@ -97,6 +97,7 @@ GDScriptParser::GDScriptParser() {
 		register_annotation(MethodInfo("@icon", PropertyInfo(Variant::STRING, "icon_path")), AnnotationInfo::SCRIPT, &GDScriptParser::icon_annotation);
 		register_annotation(MethodInfo("@static_unload"), AnnotationInfo::SCRIPT, &GDScriptParser::static_unload_annotation);
 		register_annotation(MethodInfo("@abstract"), AnnotationInfo::SCRIPT | AnnotationInfo::CLASS | AnnotationInfo::FUNCTION, &GDScriptParser::abstract_annotation);
+		register_annotation(MethodInfo("@interface"), AnnotationInfo::SCRIPT | AnnotationInfo::CLASS, &GDScriptParser::interface_annotation);
 		// Onready annotation.
 		register_annotation(MethodInfo("@onready"), AnnotationInfo::VARIABLE, &GDScriptParser::onready_annotation);
 		// Export annotations.
@@ -671,7 +672,7 @@ void GDScriptParser::parse_program() {
 		}
 	}
 
-	if (current.type == GDScriptTokenizer::Token::CLASS_NAME || current.type == GDScriptTokenizer::Token::EXTENDS) {
+	if (current.type == GDScriptTokenizer::Token::CLASS_NAME || current.type == GDScriptTokenizer::Token::EXTENDS || GDScriptTokenizer::Token::IMPLEMENTS) {
 		// Set range of the class to only start at extends or class_name if present.
 		reset_extents(head, current);
 	}
@@ -698,6 +699,15 @@ void GDScriptParser::parse_program() {
 					end_statement("superclass");
 				}
 				break;
+			case GDScriptTokenizer::Token::IMPLEMENTS:
+				PUSH_PENDING_ANNOTATIONS_TO_HEAD;
+				advance();
+				if (head->implements_used) {
+					push_error(R"("implements" can only be used once.)");
+				} else {
+					parse_implements();
+					end_statement("implemented class");
+				}
 			case GDScriptTokenizer::Token::TK_EOF:
 				PUSH_PENDING_ANNOTATIONS_TO_HEAD;
 				can_have_class_or_extends = false;
@@ -866,6 +876,10 @@ GDScriptParser::ClassNode *GDScriptParser::parse_class(bool p_is_static) {
 		parse_extends();
 	}
 
+	if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+		parse_implements();
+	}
+
 	consume(GDScriptTokenizer::Token::COLON, R"(Expected ":" after class declaration.)");
 
 	bool multiline = match(GDScriptTokenizer::Token::NEWLINE);
@@ -882,6 +896,14 @@ GDScriptParser::ClassNode *GDScriptParser::parse_class(bool p_is_static) {
 		}
 		parse_extends();
 		end_statement("superclass");
+	}
+
+	if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+		if (n_class->implements_used) {
+			push_error(R"(Cannot use "implements" more than once in the same class.)");
+		}
+		parse_implements();
+		end_statement("implemented class");
 	}
 
 	parse_class_body(multiline);
@@ -904,7 +926,16 @@ void GDScriptParser::parse_class_name() {
 	if (match(GDScriptTokenizer::Token::EXTENDS)) {
 		// Allow extends on the same line.
 		parse_extends();
-		end_statement("superclass");
+
+		if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+			parse_implements();
+			end_statement("interface");
+		} else {
+			end_statement("superclass");
+		}
+	} else if (match(GDScriptTokenizer::Token::IMPLEMENTS)) {
+		parse_implements();
+		end_statement("interface");
 	} else {
 		end_statement("class_name statement");
 	}
@@ -939,6 +970,22 @@ void GDScriptParser::parse_extends() {
 			return;
 		}
 		current_class->extends.push_back(parse_identifier());
+	}
+}
+
+void GDScriptParser::parse_implements() {
+	current_class->implements_used = true;
+
+	if (!consume(GDScriptTokenizer::Token::IDENTIFIER, R"(Expected interface name after "implements".)")) {
+		return;
+	}
+	current_class->implements.push_back(parse_identifier());
+
+	while (match(GDScriptTokenizer::Token::COMMA)) {
+		if (!consume(GDScriptTokenizer::Token::IDENTIFIER, R"(Expected interface name after ",".)")) {
+			return;
+		}
+		current_class->implements.push_back(parse_identifier());
 	}
 }
 
@@ -4191,6 +4238,7 @@ GDScriptParser::ParseRule *GDScriptParser::get_rule(GDScriptTokenizer::Token::Ty
 		{ nullptr,                                          nullptr,                                        PREC_NONE }, // ENUM,
 		{ nullptr,                                          nullptr,                                        PREC_NONE }, // EXTENDS,
 		{ &GDScriptParser::parse_lambda,                    nullptr,                                        PREC_NONE }, // FUNC,
+		{ nullptr,											nullptr,										PREC_NONE }, // IMPLEMENTS
 		{ nullptr,                                          &GDScriptParser::parse_binary_operator,      	PREC_CONTENT_TEST }, // TK_IN,
 		{ nullptr,                                          &GDScriptParser::parse_type_test,            	PREC_TYPE_TEST }, // IS,
 		{ nullptr,                                          nullptr,                                        PREC_NONE }, // NAMESPACE,
@@ -4392,6 +4440,28 @@ bool GDScriptParser::abstract_annotation(AnnotationNode *p_annotation, Node *p_t
 			return false;
 		}
 		function_node->is_abstract = true;
+		return true;
+	}
+	ERR_FAIL_V_MSG(false, R"("@abstract" annotation can only be applied to classes and functions.)");
+}
+
+bool GDScriptParser::interface_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
+	// NOTE: Use `p_target`, **not** `p_class`, because when `p_target` is a class then `p_class` refers to the outer class.
+	if (p_target->type == Node::CLASS) {
+		ClassNode *class_node = static_cast<ClassNode *>(p_target);
+		if (class_node->is_interface) {
+			push_error(R"("@interface" annotation can only be used once per class.)", p_annotation);
+			return false;
+		}
+		if (class_node->is_abstract) {
+			push_error(R"("@abstract" annotation cannot be used alongside "@interface".)", p_annotation);
+			return false;
+		}
+		if (class_node->extends_used) {
+			push_error(R"(Classes marked with "@interface" cannot derive from other classes.)");
+			return false;
+		}
+		class_node->is_interface = true;
 		return true;
 	}
 	ERR_FAIL_V_MSG(false, R"("@abstract" annotation can only be applied to classes and functions.)");

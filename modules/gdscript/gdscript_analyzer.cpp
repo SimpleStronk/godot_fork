@@ -618,6 +618,110 @@ Error GDScriptAnalyzer::resolve_class_inheritance(GDScriptParser::ClassNode *p_c
 	class_type.native_type = result.native_type;
 	p_class->set_datatype(class_type);
 
+	/*
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	*/
+
+	if (p_class->implements_used) {
+		if (p_class->implements.is_empty()) {
+			push_error("Could not resolve an empty interface path.", p_class);
+			return ERR_PARSE_ERROR;
+		}
+
+		for (int i = 0; i < p_class->implements.size(); ++i) {
+			GDScriptParser::IdentifierNode *id = p_class->implements[i];
+			const StringName &name = id->name;
+			GDScriptParser::DataType interface;
+
+			if (ScriptServer::is_global_class(name)) {
+				String interface_path = ScriptServer::get_global_class_path(name);
+				interface.type_source = GDScriptParser::DataType::ANNOTATED_EXPLICIT;
+
+				if (GDScript::is_canonically_equal_paths(interface_path, parser->script_path)) {
+					interface = parser->head->get_datatype();
+				} else {
+					Ref<GDScriptParserRef> interface_parser = parser->get_depended_parser_for(interface_path);
+					if (interface_parser.is_null()) {
+						push_error(vformat(R"(Could not resolve interface "%s".)", name), id);
+						return ERR_PARSE_ERROR;
+					}
+
+					Error err = interface_parser->raise_status(GDScriptParserRef::INHERITANCE_SOLVED);
+					if (err != OK) {
+						push_error(vformat(R"(Could not resolve super class inheritance from "%s".)", name), id);
+						return err;
+					}
+
+#ifdef DEBUG_ENABLED
+					if (!parser->_is_tool && interface_parser->get_parser()->_is_tool) {
+						parser->push_warning(p_class, GDScriptWarning::MISSING_TOOL);
+					}
+#endif // DEBUG_ENABLED
+
+					interface = interface_parser->get_parser()->head->get_datatype();
+				}
+			} else if (ProjectSettings::get_singleton()->has_autoload(name) && ProjectSettings::get_singleton()->get_autoload(name).is_singleton) {
+				const ProjectSettings::AutoloadInfo &info = ProjectSettings::get_singleton()->get_autoload(name);
+				interface.type_source = GDScriptParser::DataType::ANNOTATED_EXPLICIT;
+				if (info.path.get_extension().to_lower() != GDScriptLanguage::get_singleton()->get_extension()) {
+					push_error(vformat(R"(Singleton %s is not a GDScript.)", info.name), id);
+					return ERR_PARSE_ERROR;
+				}
+
+				Ref<GDScriptParserRef> info_parser = parser->get_depended_parser_for(info.path);
+				if (info_parser.is_null()) {
+					push_error(vformat(R"(Could not parse singleton from "%s".)", info.path), id);
+					return ERR_PARSE_ERROR;
+				}
+
+				Error err = info_parser->raise_status(GDScriptParserRef::INHERITANCE_SOLVED);
+				if (err != OK) {
+					push_error(vformat(R"(Could not resolve interface implementation from "%s".)", name), id);
+					return err;
+				}
+
+#ifdef DEBUG_ENABLED
+				if (!parser->_is_tool && info_parser->get_parser()->_is_tool) {
+					parser->push_warning(p_class, GDScriptWarning::MISSING_TOOL);
+				}
+#endif // DEBUG_ENABLED
+
+				interface = info_parser->get_parser()->head->get_datatype();
+			} else if (class_exists(name)) {
+				interface.type_source = GDScriptParser::DataType::ANNOTATED_EXPLICIT;
+				if (Engine::get_singleton()->has_singleton(name)) {
+					push_error(vformat(R"(Cannot implement native class "%s" because it is an engine singleton.)", name), id);
+					return ERR_PARSE_ERROR;
+				}
+				interface.kind = GDScriptParser::DataType::NATIVE;
+				interface.builtin_type = Variant::OBJECT;
+				interface.native_type = name;
+			} else {
+				return ERR_PARSE_ERROR;
+			}
+
+			if (!interface.is_set() || interface.has_no_type()) {
+				// TODO: More specific error messages.
+				push_error(vformat(R"(Could not resolve interfaces for class "%s".)", p_class->identifier == nullptr ? "<main>" : p_class->identifier->name), p_class);
+				return ERR_PARSE_ERROR;
+			}
+
+			p_class->interface_types.push_back(interface);
+		}
+	}
+
+	/*
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	---------------------------------------------------------------------
+	*/
+
 	// Apply annotations.
 	for (GDScriptParser::AnnotationNode *&E : p_class->annotations) {
 		resolve_annotation(E);
@@ -1411,6 +1515,7 @@ void GDScriptAnalyzer::resolve_class_body(GDScriptParser::ClassNode *p_class, co
 				resolve_annotation(E);
 				E->apply(parser, member.function, p_class);
 			}
+			member.function->is_interface = p_class->is_interface;
 			resolve_function_body(member.function);
 		} else if (member.type == GDScriptParser::ClassNode::Member::VARIABLE && member.variable->property != GDScriptParser::VariableNode::PROP_NONE) {
 			if (member.variable->property == GDScriptParser::VariableNode::PROP_INLINE) {
@@ -1527,8 +1632,43 @@ void GDScriptAnalyzer::resolve_class_body(GDScriptParser::ClassNode *p_class, co
 		resolve_pending_lambda_bodies();
 	}
 
+	if (p_class->is_interface) {
+		const String class_name = p_class->identifier == nullptr ? p_class->fqcn.get_file() : String(p_class->identifier->name);
+		const GDScriptParser::ClassNode *base_class = p_class;
+
+		for (GDScriptParser::ClassNode::Member member : p_class->members) {
+				switch (member.type)
+				{
+					case GDScriptParser::ClassNode::Member::CLASS:
+					case GDScriptParser::ClassNode::Member::CONSTANT:
+					case GDScriptParser::ClassNode::Member::ENUM:
+					case GDScriptParser::ClassNode::Member::ENUM_VALUE:
+					case GDScriptParser::ClassNode::Member::GROUP:
+					case GDScriptParser::ClassNode::Member::SIGNAL:
+					{
+						push_error(vformat(R"*(Class "%s" is is an interface but contains non-function members. Remove these members, or remove "@interface" from the class.)*", class_name), p_class);
+						continue;
+						break;
+					}
+					case GDScriptParser::ClassNode::Member::FUNCTION:
+					{
+						break;
+					}
+					default:
+					{
+						continue;
+						break;
+					}
+				}
+
+			if (!member.function->body->statements.is_empty()) {
+				push_error(vformat(R"*(Class %s is an interface but contains functions with function bodies, %s.%s. Remove function bodies from all methods.)*", class_name, class_name, member.function->identifier->name), p_class);
+			}
+		}
+	}
+
 	// Resolve base abstract class/method implementation requirements.
-	if (!p_class->is_abstract) {
+	if (!p_class->is_abstract && !p_class->is_interface) {
 		HashSet<StringName> implemented_funcs;
 		const GDScriptParser::ClassNode *base_class = p_class;
 		while (base_class != nullptr) {
@@ -1561,6 +1701,47 @@ void GDScriptAnalyzer::resolve_class_body(GDScriptParser::ClassNode *p_class, co
 				base_class = base_parser_ref->get_parser()->head;
 			} else {
 				break;
+			}
+		}
+	}
+
+	if (p_class->implements_used) {
+		HashSet<StringName> implemented_funcs;
+		HashMap<StringName, String> implemented_signatures;
+
+		for (const GDScriptParser::ClassNode::Member &member : p_class->members) {
+			if (member.type == GDScriptParser::ClassNode::Member::FUNCTION) {
+				implemented_funcs.insert(member.function->identifier->name);
+				implemented_signatures[member.function->identifier->name] = member.function->signature;
+			}
+		}
+
+		for (int i = 0; i < p_class->interface_types.size(); ++i) {
+			GDScriptParser::ClassNode *interface_class;
+			if (p_class->interface_types[i].kind == GDScriptParser::DataType::CLASS) {
+				interface_class = p_class->interface_types[i].class_type;
+			} else if (p_class->interface_types[i].kind == GDScriptParser::DataType::SCRIPT) {
+				Ref<GDScriptParserRef> interface_parser_ref = parser->get_depended_parser_for(p_class->interface_types[i].script_path);
+				ERR_BREAK(interface_parser_ref.is_null());
+				interface_class = interface_parser_ref->get_parser()->head;
+			} else {
+				break;
+			}
+
+			if (!interface_class->is_interface) {
+				const String interface_name = interface_class->identifier == nullptr ? interface_class->fqcn.get_file() : String(interface_class->identifier->name);
+				push_error(vformat(R"(Implemented class "%s" is not an interface)", interface_name), p_class);
+				break;
+			}
+
+			for (GDScriptParser::ClassNode::Member member : interface_class->members) {
+				const String class_name = p_class->identifier == nullptr ? p_class->fqcn.get_file() : String(p_class->identifier->name);
+				const String interface_name = interface_class->identifier == nullptr ? interface_class->fqcn.get_file() : String(interface_class->identifier->name);
+				if (!implemented_funcs.has(member.function->identifier->name)) {
+					push_error(vformat(R"*(Class "%s" must implement "%s.%s()" and other interface functions.)*", class_name, interface_name, member.function->identifier->name), p_class);
+				} else if (implemented_signatures[member.function->identifier->name] != member.function->signature) {
+					push_error(vformat(R"*(Class "%s" implementing "%s.%s()" must have matching function signature.)*", class_name, interface_name, member.function->identifier->name), p_class);
+				}
 			}
 		}
 	}
@@ -1991,7 +2172,7 @@ void GDScriptAnalyzer::resolve_function_body(GDScriptParser::FunctionNode *p_fun
 		// Non-abstract functions must have a body.
 		if (p_function->source_lambda != nullptr) {
 			push_error(R"(A lambda function must have a ":" followed by a body.)", p_function);
-		} else if (!p_function->is_abstract) {
+		} else if (!p_function->is_abstract && !p_function->is_interface) {
 			push_error(R"(A function must either have a ":" followed by a body, or be marked as "@abstract".)", p_function);
 		}
 		return;
@@ -2000,6 +2181,9 @@ void GDScriptAnalyzer::resolve_function_body(GDScriptParser::FunctionNode *p_fun
 		if (p_function->is_abstract) {
 			push_error(R"(An abstract function cannot have a body.)", p_function->body);
 			return;
+		}
+		if (p_function->is_interface) {
+			push_error(R"(An interface function cannot have a body.)", p_function->body);
 		}
 	}
 
@@ -6271,6 +6455,22 @@ bool GDScriptAnalyzer::check_type_compatibility(const GDScriptParser::DataType &
 			}
 			return false;
 		case GDScriptParser::DataType::CLASS:
+			/*
+			-------------------------------------------- MY CODE
+			*/
+			if (p_target.class_type->is_interface) {
+				const String &target_identifier = p_target.class_type->identifier->name;
+				if (p_source.kind == GDScriptParser::DataType::CLASS) {
+					for (const GDScriptParser::IdentifierNode *id : p_source.class_type->implements) {
+						if (id->name == target_identifier) {
+							return true;
+						}
+					}
+				}
+			}
+			/*
+			-------------------------------------------- MY CODE
+			*/
 			if (p_target.is_meta_type) {
 				return ClassDB::is_parent_class(src_native, GDScript::get_class_static());
 			}
